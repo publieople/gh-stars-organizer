@@ -1,53 +1,43 @@
 ---
 name: gh-stars-organizer
-description: Organize GitHub starred repositories into categorized Lists using AI. The agent reads your stars, analyzes them, and creates GitHub Lists with smart categorization — turning 800+ unorganized stars into browsable, searchable collections.
+description: Organize starred repos into GitHub Lists with AI reasoning — agent examines each repo individually, never regex rules.
 ---
 
 # GitHub Stars Organizer
 
-Use AI to automatically organize your GitHub starred repositories into categorized [GitHub Lists](https://github.com/stars) — making 800+ unorganized stars browsable and searchable in minutes.
+Use AI reasoning to categorize starred repos into GitHub Lists. The agent examines each repo's name, description, and topics to understand what it IS, then assigns the best-fit category.
 
-## When to Use
-
-- "I have too many starred repos and can't find anything"
-- "Organize my GitHub stars"
-- "Categorize my starred repositories"
-- "Clean up my GitHub stars into lists"
+**CRITICAL: Never use regex rules as primary classifier.** The agent MUST reason about each repo individually. Regex is only acceptable as a fast first-pass bulk pre-sort if the user has 500+ repos and doesn't want to wait.
 
 ## Prerequisites
 
-This skill uses `gh` CLI + GraphQL. The agent should verify:
+Verify `gh auth status`. If `user` scope missing: `gh auth refresh -h github.com -s user`
 
+## Core Principle: Agent Reasoning Per Repo
+
+For every repo, the agent reads `nameWithOwner`, `description`, `language`, and `topics`, then asks itself: **"What is this project?"** — not "what keywords match?"
+
+- A repo named `anthropics/claude-code` with desc "agentic coding tool" → 🤖 AI-Agents
+- A repo named `fatedier/frp` with desc "reverse proxy to expose local server" → 🏠 Self-Hosted  
+- A repo named `harry0703/MoneyPrinterTurbo` with desc "一键生成短视频" → ⚡ Automation
+- A repo named `torvalds/linux` → 🔧 Dev-Tools (infrastructure, not a library)
+
+## Workflow
+
+### 1. Discovery
+
+Pull existing lists:
+```graphql
+query { viewer { lists(first: 30) { nodes { id name } } } }
 ```
-gh auth status
-```
 
-If the user's token lacks the `user` scope (needed for List management), guide them:
+### 2. Fetch repos (small batches: 30-50 per batch)
 
-```
-gh auth refresh -h github.com -s user
-```
-
-## Core Workflow
-
-### Step 1: Discover current Lists
-
+GraphQL pull (from starred list or a specific list):
 ```graphql
 query {
   viewer {
-    lists(first: 20) {
-      nodes { id name description }
-    }
-  }
-}
-```
-
-### Step 2: Fetch starred repos (100 per batch)
-
-```graphql
-query($cursor: String) {
-  viewer {
-    starredRepositories(first: 100, orderBy: {field: STARRED_AT, direction: DESC}, after: $cursor) {
+    starredRepositories(first: 50, orderBy: {field: STARRED_AT, direction: DESC}, after: null) {
       pageInfo { hasNextPage endCursor }
       edges {
         node {
@@ -56,7 +46,6 @@ query($cursor: String) {
           description
           primaryLanguage { name }
           repositoryTopics(first: 5) { nodes { topic { name } } }
-          stargazerCount
         }
       }
     }
@@ -64,97 +53,92 @@ query($cursor: String) {
 }
 ```
 
-Run via: `gh api graphql -f query='...'`
-
-### Step 3: AI analyzes each batch
-
-For each repository, the agent reads `nameWithOwner`, `description`, `primaryLanguage`, and `repositoryTopics` to decide the best category.
-
-**Classification guidelines:**
-- Create 12-18 lists max — too many becomes noise
-- Categorize by **what the repo is** (not what language it's written in)
-- Prefer existing lists when they fit; create new ones sparingly
-- A repo can be in ONE list (GitHub limitation)
-- Common categories: AI-Agents, Coding-Tools, Automation, Dev-Tools, Libraries, Apps, Docs, Game-Dev, Frontend-UI
-
-**Context compression reminder:** After each batch of 100 repos, prompt: "Batch N done. Use /compact or /new before the next batch to avoid context overflow."
-
-### Step 4: Create Lists
-
+Querying a specific list (MUST use `... on Repository` — items is union type):
 ```graphql
-mutation {
-  createUserList(input: {
-    name: "🤖 AI-Agents",
-    description: "Agent frameworks, multi-agent systems, orchestration",
-    isPrivate: false
-  }) {
-    list { id name }
+query {
+  node(id: "UL_xxx") {
+    ... on UserList {
+      items(first: 100, after: null) {
+        pageInfo { hasNextPage endCursor }
+        edges { node { ... on Repository { id nameWithOwner description primaryLanguage { name } repositoryTopics(first: 5) { nodes { topic { name } } } } } }
+      }
+    }
   }
 }
 ```
 
-### Step 5: Assign repos to Lists
+### 3. AI classifies each batch
+
+For each batch of 30-50 repos:
+1. Read all repo metadata (name, desc, lang, topics)
+2. For each repo, reason about its category — understand what the project IS
+3. Assign the best matching existing list, or create a new one
+4. Execute mutations immediately (don't batch all to the end)
+
+**Category guide (reason, don't regex-match):**
+- 🤖 **AI-Agents**: agent frameworks, MCP, tool-use, agentic systems, AI assistants
+- 🌐 **AI-Gateways**: LLM API proxies, model routers, provider aggregators
+- 🐟 **AstrBot**: QQ bots, OneBot, NapCat, mirai, QQ group tools
+- 🛠️ **Coding-Tools**: CLI tools, editors, formatters, terminal utilities, shell plugins
+- 📋 **LLM-Skills**: agent skills, SKILL.md repos, prompt templates, cursorrules
+- ⚡ **Automation**: scrapers, automation scripts, n8n, data pipelines, 自动化工具
+- 🏠 **Self-Hosted**: Docker compose stacks, self-hosted services, NAS tools, proxy tools (frp)
+- 📦 **Libraries-SDKs**: SDKs, API wrappers, npm/pypi packages, language bindings
+- 🔧 **Dev-Tools**: Git tools, CI/CD, build systems, devops, debuggers, system tools
+- 🎨 **Frontend-UI**: UI component libraries, CSS frameworks, design systems
+- 🧠 **AI-ML-Research**: papers, benchmarks, datasets, research code
+- 📱 **Apps-Clients**: Desktop/mobile apps, browser extensions, GUI tools, user-facing software
+- 💾 **Data-Storage**: databases, cache systems, storage engines
+- 🎮 **Game-Dev**: game engines, mods, game development tools
+- 📚 **Docs-Learning**: tutorials, awesome lists, documentation, learning resources
+- 🎨 **ComfyUI**: ComfyUI nodes and workflows
+- 🧠 **BCI-Neuro**: brain-computer interfaces, neuroscience
+- 🤖 **LLMs-Models**: model weights, TTS, diffusion models, 3D/video generation, training repos
+
+### 4. Mutations
+
+Create list:
+```graphql
+mutation { createUserList(input: {name: "🤖 AI-Agents", description: "...", isPrivate: false}) { list { id } } }
+```
+
+Assign (one call moves a repo between lists):
+```graphql
+mutation { updateUserListsForItem(input: {itemId: "R_xxx", listIds: ["UL_xxx"]}) { clientMutationId } }
+```
+
+### 5. Review pass (MANDATORY after initial classification)
+
+After all repos are classified, check each list for obvious misclassifications. Particularly:
+- Any list with 200+ repos likely has false positives — pull its contents and re-examine 30 at a time
+- Lists with single-digit counts may be too granular — consider merging
+
+### 6. Report
 
 ```graphql
-mutation {
-  updateUserListsForItem(input: {
-    itemId: "R_kgDOOIt0fw",
-    listIds: ["UL_kwDOBV8csM4AhGre"]
-  }) {
-    clientMutationId
-  }
-}
+query { viewer { lists(first: 30) { nodes { name items: items(first: 1) { totalCount } } } } }
 ```
 
-Rate limit: ~3 requests/second. 100 repos ≈ 35 seconds.
+## Execution Strategy
 
-### Step 6: Report results
+- **Small batches**: 30-50 repos per AI reasoning batch. Large batches cause context issues and timeout
+- **Mutations inline**: assign each repo as you classify it, don't queue all to the end
+- **0.15s delay** between mutations to avoid rate limiting
+- **Use execute_code**, not delegate_task — subagents time out on this workload
+- If context fills mid-classification, pause, report progress, and ask to continue
 
-After classification, show the user a summary:
+## Correction
 
-```
-🤖 AI-Agents:     22 repos
-🛠️ Coding-Tools:  31 repos
-📦 Libraries:     69 repos
-...
-Total: 200 repos in 14 lists
-View at: https://github.com/<username>?tab=stars
-```
-
-## Correction Mechanism
-
-If the user says a repo is in the wrong list:
-
-```
-The user wants to move <repo-name> out of <current-list> into <target-list>.
-
-1. Remove: updateUserListsForItem(itemId: "<id>", listIds: [<target_list_id>])
-2. This REPLACES the assignment — GitHub only allows one list per item
-```
-
-## Deleting Lists
-
-```graphql
-mutation {
-  deleteUserList(input: { listId: "UL_xxx" }) { clientMutationId }
-}
-```
-
-## Cron Automation (optional)
-
-For agents that support cron (Hermes, ClawdBot), schedule daily updates:
-
-```bash
-# Run every day at 3 AM
-cron: "0 3 * * *"
-prompt: "Fetch newly starred repos (since last run) and categorize them into existing Lists. Only process repos starred in the last 24 hours."
-```
+User says "X doesn't belong in Y":
+1. Find the repo ID from the list contents
+2. `updateUserListsForItem(itemId: "ID", listIds: ["TARGET_LIST_ID"])` — replaces previous assignment
 
 ## Troubleshooting
 
 | Problem | Fix |
 |---------|-----|
-| `INSUFFICIENT_SCOPES` error | Run `gh auth refresh -h github.com -s user` |
-| `gh` not installed | `brew install gh` / `winget install GitHub.cli` / `apt install gh` |
-| Rate limited | Add 500ms delay between mutations |
-| `You have already starred this repository` | Normal — no action needed |
+| INSUFFICIENT_SCOPES | `gh auth refresh -h github.com -s user` |
+| List too large after pass 1 | Run Pass 2 AI reclassification of that list |
+| Subagent timeouts | Use execute_code directly, 30-50 per batch |
+| Rate limited | sleep(0.15) between mutations |
+| `... on Repository` required | items field is union type, must query via inline fragment |
